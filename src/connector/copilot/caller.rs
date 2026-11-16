@@ -289,6 +289,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: None,
                 thinking_blocks: None,
+                reasoning_content: None,
                 images: None,
             },
             ChatMessage {
@@ -305,6 +306,7 @@ mod tests {
                 }]),
                 tool_call_id: None,
                 thinking_blocks: None,
+                reasoning_content: None,
                 images: None,
             },
             ChatMessage {
@@ -313,6 +315,7 @@ mod tests {
                 tool_calls: None,
                 tool_call_id: Some("t1".into()),
                 thinking_blocks: None,
+                reasoning_content: None,
                 images: None,
             },
         ];

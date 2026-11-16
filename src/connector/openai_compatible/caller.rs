@@ -408,6 +408,7 @@ fn build_messages(prompt: &str, system_prompt: Option<&str>) -> Vec<ApiChatMessa
             tool_calls: None,
             tool_call_id: None,
             thinking_blocks: None,
+            reasoning_content: None,
             images: None,
         });
     }
@@ -801,6 +802,27 @@ fn build_chat_request(
     // openai connector pointed at a NIM base URL will not receive it.
     let chat_template_kwargs = (provider == "nvidia" && params.reasoning_effort.is_some())
         .then_some(ChatTemplateKwargs { thinking: true });
+    // DeepSeek-style reasoning models require `reasoning_content` on EVERY
+    // assistant message in the conversation history once thinking is active
+    // — including messages that carried no reasoning of their own (they take
+    // an empty string). Only normalize when at least one assistant message
+    // actually carries reasoning: that is the proof that the active model is
+    // a reasoning model in thinking mode, and it keeps plain chat models (which
+    // can reject the field outright) untouched.
+    let mut messages = messages;
+    let thinking_active = messages.iter().any(|m| {
+        m.role == "assistant"
+            && m.reasoning_content
+                .as_ref()
+                .is_some_and(|r| !r.trim().is_empty())
+    });
+    if thinking_active {
+        for m in &mut messages {
+            if m.role == "assistant" && m.reasoning_content.is_none() {
+                m.reasoning_content = Some(String::new());
+            }
+        }
+    }
     // Lower the internal image channel onto the chat-completions wire
     // BEFORE building the request: a tool result carrying a screenshot
     // becomes a multimodal content-parts array here (see
@@ -1239,6 +1261,7 @@ mod image_lowering_tests {
             tool_calls: None,
             tool_call_id: None,
             thinking_blocks: None,
+            reasoning_content: None,
             images: None,
         };
         let lowered = lower_images_to_wire(std::slice::from_ref(&msg));
@@ -1258,6 +1281,7 @@ mod image_lowering_tests {
             tool_calls: None,
             tool_call_id: None,
             thinking_blocks: None,
+            reasoning_content: None,
             images: None,
         };
         let tool = tool_result_message_with_images("call_2", "shot", vec![sample_image()]);
@@ -1281,6 +1305,7 @@ mod image_lowering_tests {
             tool_calls: None,
             tool_call_id: Some("c".to_string()),
             thinking_blocks: None,
+            reasoning_content: None,
             images: Some(Vec::new()),
         };
         let lowered = lower_images_to_wire(std::slice::from_ref(&msg));

@@ -750,6 +750,7 @@ pub async fn chat(
         tool_calls: None,
         tool_call_id: None,
         thinking_blocks: None,
+        reasoning_content: None,
         images: None,
     }];
     let request = build_request(&model, system, &messages, params, false);
@@ -864,6 +865,7 @@ pub async fn chat_stream(
         tool_calls: None,
         tool_call_id: None,
         thinking_blocks: None,
+        reasoning_content: None,
         images: None,
     }];
     stream_responses(config, params, system, messages, service).await

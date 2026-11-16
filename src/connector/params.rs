@@ -78,6 +78,13 @@ pub struct ChatMessage {
     /// OpenAI-compatible wire format.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_blocks: Option<Vec<ClaudeThinkingBlock>>,
+    /// Reasoning/thinking text captured for this assistant turn (OpenAI-
+    /// compatible `reasoning_content` field). Replayed verbatim on the
+    /// next request for reasoning models that require it (e.g. DeepSeek);
+    /// `skip_serializing_if` keeps it off providers/wire formats that have
+    /// no such field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     /// Images delivered WITH this message (multimodal channel). The
     /// intended use is a `tool` result carrying a screenshot. Internal
     /// transport detail: every caller lowers it to its provider's native
@@ -124,6 +131,7 @@ pub fn tool_result_message(tool_call_id: &str, content: &str) -> ChatMessage {
         tool_calls: None,
         tool_call_id: Some(tool_call_id.to_string()),
         thinking_blocks: None,
+        reasoning_content: None,
         images: None,
     }
 }
@@ -142,6 +150,7 @@ pub fn tool_result_message_with_images(
         tool_calls: None,
         tool_call_id: Some(tool_call_id.to_string()),
         thinking_blocks: None,
+        reasoning_content: None,
         images: Some(images),
     }
 }
@@ -155,6 +164,7 @@ pub fn assistant_tool_call_message(tool_calls: Vec<ToolCallMsg>) -> ChatMessage 
         tool_calls: Some(tool_calls),
         tool_call_id: None,
         thinking_blocks: None,
+        reasoning_content: None,
         images: None,
     }
 }
@@ -168,6 +178,7 @@ pub fn user_message(content: &str) -> ChatMessage {
         tool_calls: None,
         tool_call_id: None,
         thinking_blocks: None,
+        reasoning_content: None,
         images: None,
     }
 }
@@ -181,6 +192,7 @@ pub fn system_message(content: &str) -> ChatMessage {
         tool_calls: None,
         tool_call_id: None,
         thinking_blocks: None,
+        reasoning_content: None,
         images: None,
     }
 }
