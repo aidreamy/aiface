@@ -57,6 +57,7 @@ pub use params::{
     ToolCallMode, ToolCallMsg, ToolDefinition, ToolFunction, assistant_tool_call_message,
     system_message, tool_result_message, tool_result_message_with_images, user_message,
 };
+pub use params::sanitize_tool_parameters;
 pub use provider::{
     COSH_SERVICE, OPENCODE_GO_PROVIDER, OPENCODE_ZEN_PROVIDER, clear_api_key_cache,
     custom_provider_names, detect_provider, forget_provider_key, get_api_key, get_provider,

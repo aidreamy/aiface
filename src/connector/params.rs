@@ -261,10 +261,42 @@ impl ToolFunction {
     }
 
     /// Set the JSON Schema describing the function's parameters.
+    ///
+    /// The schema is normalized on the way in: JSON Schema keywords that some
+    /// providers (OpenAI in particular) reject at the top level of a tool's
+    /// `parameters` object — `anyOf`, `allOf`, `oneOf`, `not`, `if`, `then`,
+    /// `else` — are stripped recursively. The constraints are still enforced
+    /// by the tool implementation itself, so dropping them from the schema only
+    /// loosens the *hint* given to the model; it never weakens validation.
     #[must_use]
     pub fn with_parameters(mut self, parameters: serde_json::Value) -> Self {
-        self.parameters = Some(parameters);
+        self.parameters = Some(sanitize_tool_parameters(parameters));
         self
+    }
+}
+
+/// Normalize a tool's JSON Schema parameters for providers that reject
+/// `anyOf`/`allOf`/`oneOf`/`not`/`if`/`then`/`else` (OpenAI in particular).
+/// Only those structural keywords are removed; `enum`, `const`, `type`,
+/// `properties`, `$defs`, ... are preserved. Applied recursively so nested
+/// conditional blocks (e.g. inside `$defs`) are flattened too.
+#[must_use]
+pub fn sanitize_tool_parameters(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, v) in map {
+                if matches!(k.as_str(), "anyOf" | "allOf" | "oneOf" | "not" | "if" | "then" | "else") {
+                    continue;
+                }
+                out.insert(k, sanitize_tool_parameters(v));
+            }
+            serde_json::Value::Object(out)
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.into_iter().map(sanitize_tool_parameters).collect())
+        }
+        other => other,
     }
 }
 
