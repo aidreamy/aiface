@@ -1073,6 +1073,22 @@ impl Connector {
             .or_else(|| self.provider.map(|p| p.default_model))
     }
 
+    /// Whether the ACTIVE model can read images, from the cached catalogs.
+    ///
+    /// `Some(false)` is a positive catalogue statement (drop image-only
+    /// tools); `None` means unknown — the cache is empty, stale or silent
+    /// about this model, and the caller must discover the capability another
+    /// way instead of assuming text-only. `cache_dir` is the same cache
+    /// namespace the caller passes to `discover_context_window`.
+    #[must_use]
+    pub fn is_vlm(&self, cache_dir: Option<&str>) -> Option<bool> {
+        crate::connector::discovery::is_vlm_for(
+            self.effective_model()?,
+            self.provider_name(),
+            cache_dir,
+        )
+    }
+
     /// Whether native tool definitions are currently registered on this
     /// connector (`set_tools`/`with_tools` was called and the list is
     /// non-empty).

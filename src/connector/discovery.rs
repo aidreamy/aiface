@@ -38,6 +38,16 @@ struct OpenRouterModel {
     #[serde(default)]
     canonical_slug: Option<String>,
     context_length: Option<usize>,
+    /// Input/output modality metadata (`{"input_modalities": ["text",
+    /// "image"]}`). Absent on older catalog snapshots.
+    #[serde(default)]
+    architecture: Option<OpenRouterArchitecture>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct OpenRouterArchitecture {
+    #[serde(default)]
+    input_modalities: Vec<String>,
 }
 
 /// Response from Anthropic's /v1/models/{model_id} endpoint.
@@ -74,7 +84,13 @@ struct ModelsDevProvider {
 
 #[derive(Debug, Default, Deserialize)]
 struct ModelsDevModel {
+    #[serde(default)]
     limit: ModelsDevLimit,
+    /// What the model accepts on the wire (`{"input": ["text", "image"],
+    /// "output": ["text"]}`). Absent on catalog entries written before the
+    /// field existed — treated as "unknown", never as "text only".
+    #[serde(default)]
+    modalities: Option<ModelsDevModalities>,
     /// Whether the model advertises reasoning/thinking support. `None` when
     /// the (possibly stale) catalog entry predates the field — treated as
     /// "unknown" so callers fall back to a heuristic instead of concluding
@@ -85,6 +101,13 @@ struct ModelsDevModel {
     /// plain toggle). Effort-style options carry the accepted values.
     #[serde(default)]
     reasoning_options: Vec<ModelsDevReasoningOption>,
+}
+
+/// What a model accepts on the wire (the catalog's `modalities` object).
+#[derive(Debug, Deserialize)]
+struct ModelsDevModalities {
+    #[serde(default)]
+    input: Vec<String>,
 }
 
 /// One entry of a model's `reasoning_options`. The catalog occasionally
@@ -194,6 +217,211 @@ pub fn model_reasoning_from_catalog(
         }
     }
     None
+}
+
+/// Input modalities advertised for a model.
+///
+/// A model that does not list `image` in [`Self::input`] cannot read images:
+/// sending one is a provider 400, not a degraded answer. `None` from
+/// [`model_input_modalities`] means the catalogs say nothing — unknown is
+/// NOT "text only", so callers must not strip image support on it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ModelModalities {
+    /// Accepted input modalities, e.g. `["text", "image", "pdf"]`.
+    pub input: Vec<String>,
+}
+
+impl ModelModalities {
+    /// Whether the model accepts `modality` (case-insensitive, e.g. `image`).
+    #[must_use]
+    pub fn accepts(&self, modality: &str) -> bool {
+        self.input
+            .iter()
+            .any(|m| m.trim().eq_ignore_ascii_case(modality))
+    }
+}
+
+/// Resolve a model's input modalities from the cached catalogs.
+///
+/// Offline and synchronous, like [`model_reasoning`]: models.dev is the
+/// primary source (its `modalities.input` covers the long tail of providers),
+/// with OpenRouter's `architecture.input_modalities` as the fallback. No
+/// network call — the caches are refreshed elsewhere at app boot.
+///
+/// # Returns
+///
+/// * `Some(ModelModalities)` — at least one catalog knows the model;
+/// * `None` — no catalog entry (or a cache without modality metadata), so the
+///   capability is UNKNOWN and the caller must not draw a conclusion.
+#[must_use]
+pub fn model_input_modalities(
+    model_name: &str,
+    cache_dir: Option<&str>,
+) -> Option<ModelModalities> {
+    model_input_modalities_for(model_name, None, cache_dir)
+}
+
+/// [`model_input_modalities`], preferring `provider`'s own catalog entry.
+///
+/// `provider` is the provider the request will actually be served by (e.g.
+/// `openai`, `openrouter`, a local gateway name). When that provider has an
+/// entry for the model it is authoritative; otherwise the answer is the union
+/// across providers, which can only err toward "accepts images" (safe: the
+/// tool stays visible and a real rejection is still caught from the wire).
+#[must_use]
+pub fn model_input_modalities_for(
+    model_name: &str,
+    provider: Option<&str>,
+    cache_dir: Option<&str>,
+) -> Option<ModelModalities> {
+    let cache = CatalogCache::new(resolve_cache_dir(cache_dir?)?);
+
+    if let Some(raw) = cache.load_raw(MODELS_DEV_CATALOG_FILE)
+        && let Ok(catalog) = serde_json::from_str::<ModelsDevCatalog>(&raw)
+    {
+        let found = find_modalities_in_models_dev(model_name, provider, &catalog.providers);
+        if found.is_some() {
+            return found;
+        }
+    }
+
+    let raw = cache.load_raw(OPENROUTER_CATALOG_FILE)?;
+    let models = serde_json::from_str::<OpenRouterModelsResponse>(&raw).ok()?;
+    find_modalities_in_openrouter(model_name, &models.data)
+}
+
+/// Whether a model can read images, from the catalogs.
+///
+/// `Some(false)` is a POSITIVE statement (the catalogs know the model and it
+/// does not accept `image`), so callers may drop image-only tools on it.
+/// `Some(true)` is a capable model. `None` is unknown — never act on it.
+#[must_use]
+pub fn is_vlm(model_name: &str, cache_dir: Option<&str>) -> Option<bool> {
+    is_vlm_for(model_name, None, cache_dir)
+}
+
+/// [`is_vlm`], resolved against `provider`'s own catalog entry first.
+#[must_use]
+pub fn is_vlm_for(
+    model_name: &str,
+    provider: Option<&str>,
+    cache_dir: Option<&str>,
+) -> Option<bool> {
+    model_input_modalities_for(model_name, provider, cache_dir).map(|m| m.accepts("image"))
+}
+
+/// Catalog lookup for modalities, using the same vendor-prefix tolerance as
+/// the context-window lookup (models.dev keys models both bare and prefixed).
+///
+/// The resolution is deliberately CONSERVATIVE: the same bare id is published
+/// by many providers (and by gateways with different capabilities), so the
+/// inputs of every matching entry are UNIONED. Entries disagreeing about
+/// `image` therefore resolve to "accepts images" — a wrong "text only" would
+/// strip a capable model's tools, while a wrong "accepts images" merely keeps
+/// the status quo (a real rejection is still caught from the provider).
+///
+/// `None` when no matching entry carries modality metadata at all, or when the
+/// metadata is empty (an unreadable entry, not a text-only model).
+fn find_modalities_in_models_dev(
+    needle: &str,
+    provider: Option<&str>,
+    providers: &HashMap<String, ModelsDevProvider>,
+) -> Option<ModelModalities> {
+    // The ACTIVE provider's own entry is the authoritative one: gateways
+    // publish the same bare id with capabilities they merely proxy.
+    if let Some(p) = provider.and_then(|name| provider_entry(providers, name))
+        && let Some(modalities) = modalities_in_provider(needle, p)
+    {
+        return Some(modalities);
+    }
+
+    // No entry for the active provider: union what every provider says, so a
+    // gateway claiming "text only" cannot strip a capable model's tools.
+    let mut input: Vec<String> = Vec::new();
+    let mut saw_modalities = false;
+    for p in providers.values() {
+        let Some(modalities) = modalities_in_provider(needle, p) else {
+            continue;
+        };
+        saw_modalities = true;
+        merge_modalities(&mut input, &modalities.input);
+    }
+    (saw_modalities && !input.is_empty()).then_some(ModelModalities { input })
+}
+
+/// The catalog entry of `provider`, matched case-insensitively.
+fn provider_entry<'a>(
+    providers: &'a HashMap<String, ModelsDevProvider>,
+    provider: &str,
+) -> Option<&'a ModelsDevProvider> {
+    providers
+        .iter()
+        .find(|(id, _)| id.eq_ignore_ascii_case(provider))
+        .map(|(_, entry)| entry)
+}
+
+/// Modalities of the models of ONE provider that match `needle` (vendor-prefix
+/// and case tolerant, like the context-window lookup). `None` when no entry
+/// carries modality metadata.
+fn modalities_in_provider(
+    needle: &str,
+    provider: &ModelsDevProvider,
+) -> Option<ModelModalities> {
+    let needle_lower = needle.to_lowercase();
+    let needle_bare = needle_lower.rsplit('/').next().unwrap_or(&needle_lower);
+    let mut input: Vec<String> = Vec::new();
+    for (id, m) in &provider.models {
+        let id_lower = id.to_lowercase();
+        let id_bare = id_lower.rsplit('/').next().unwrap_or(&id_lower);
+        let matches = id_lower == needle_lower
+            || id_lower == needle_bare
+            || id_bare == needle_lower
+            || id_bare == needle_bare;
+        if !matches {
+            continue;
+        }
+        if let Some(modalities) = m.modalities.as_ref() {
+            merge_modalities(&mut input, &modalities.input);
+        }
+    }
+    (!input.is_empty()).then_some(ModelModalities { input })
+}
+
+/// OpenRouter catalog lookup for modalities (same union policy).
+fn find_modalities_in_openrouter(
+    needle: &str,
+    models: &[OpenRouterModel],
+) -> Option<ModelModalities> {
+    let needle_lower = needle.to_lowercase();
+    let mut input: Vec<String> = Vec::new();
+    let mut saw_modalities = false;
+    for model in models {
+        let id = model.id.to_lowercase();
+        let matches = id == needle_lower
+            || id.rsplit('/').next() == Some(needle_lower.as_str())
+            || model
+                .canonical_slug
+                .as_deref()
+                .is_some_and(|c| c.to_lowercase() == needle_lower);
+        let Some(architecture) = model.architecture.as_ref().filter(|_| matches) else {
+            continue;
+        };
+        if architecture.input_modalities.is_empty() {
+            continue;
+        }
+        saw_modalities = true;
+        merge_modalities(&mut input, &architecture.input_modalities);
+    }
+    (saw_modalities && !input.is_empty()).then_some(ModelModalities { input })
+}
+
+/// Union `extra` into `acc`, case-insensitively and without duplicates.
+fn merge_modalities(acc: &mut Vec<String>, extra: &[String]) {
+    for modality in extra {
+        if !acc.iter().any(|seen| seen.eq_ignore_ascii_case(modality)) {
+            acc.push(modality.clone());
+        }
+    }
 }
 
 /// Effort levels ordered from least to most thinking, used to map a desired
@@ -1803,6 +2031,7 @@ mod tests {
             id: id.to_string(),
             canonical_slug: canonical.map(str::to_string),
             context_length: context,
+            architecture: None,
         }
     }
 
@@ -2024,6 +2253,103 @@ mod tests {
         assert_eq!(static_known_window("glm-5.1"), Some(204_800));
         assert_eq!(static_known_window("glm-5.2"), Some(1_048_576));
         assert_eq!(static_known_window("deepseek-v4-flash"), Some(1_048_576));
+    }
+
+    #[test]
+    fn catalog_resolves_input_modalities_from_models_dev() {
+        let raw = r#"{
+            "openai": {
+                "models": {
+                    "gpt-5": {
+                        "limit": {"context": 128000},
+                        "modalities": {"input": ["text", "image"], "output": ["text"]}
+                    },
+                    "gpt-5-mini": {
+                        "limit": {"context": 128000},
+                        "modalities": {"input": ["text"], "output": ["text"]}
+                    }
+                }
+            }
+        }"#;
+        let dir = seed_models_dev_cache("modalities", raw);
+
+        assert_eq!(is_vlm("gpt-5", Some(&dir)), Some(true));
+        assert_eq!(is_vlm("gpt-5-mini", Some(&dir)), Some(false));
+        // Vendor-prefixed spelling resolves through the same tolerance.
+        assert_eq!(is_vlm("openai/gpt-5", Some(&dir)), Some(true));
+        assert_eq!(
+            model_input_modalities("gpt-5", Some(&dir)),
+            Some(ModelModalities {
+                input: vec!["text".into(), "image".into()]
+            })
+        );
+        // `is_vlm` reads the same data case-insensitively.
+        assert!(ModelModalities {
+            input: vec!["TEXT".into(), "Image".into()]
+        }
+        .accepts("image"));
+        // Unknown model: unknown, never "text only".
+        assert_eq!(is_vlm("not-in-the-catalog", Some(&dir)), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The same bare id published by several providers with different
+    /// capabilities resolves to the UNION: one gateway claiming "text only"
+    /// must not strip a capable model's tools.
+    /// The active provider's own entry wins over everything a gateway says.
+    #[test]
+    fn authoritative_provider_entry_beats_the_union() {
+        let raw = r#"{
+            "gateway": {"models": {"qwen3": {"modalities": {"input": ["text", "image"]}}}},
+            "vendor": {"models": {"qwen3": {"modalities": {"input": ["text"]}}}}
+        }"#;
+        let dir = seed_models_dev_cache("authoritative", raw);
+        assert_eq!(
+            is_vlm_for("qwen3", Some("Vendor"), Some(&dir)),
+            Some(false),
+            "provider matching is case-insensitive"
+        );
+        // A provider absent from the catalog falls back to the union.
+        assert_eq!(is_vlm_for("qwen3", Some("local"), Some(&dir)), Some(true));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn conflicting_provider_entries_resolve_to_the_union() {
+        let raw = r#"{
+            "gateway": {"models": {"qwen3": {"modalities": {"input": ["text"]}}}},
+            "vendor": {"models": {"qwen3": {"modalities": {"input": ["text", "image"]}}}}
+        }"#;
+        let dir = seed_models_dev_cache("union", raw);
+        assert_eq!(is_vlm("qwen3", Some(&dir)), Some(true));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A catalog written before the `modalities` field existed says nothing
+    /// about vision — the caller must not conclude the model is text-only.
+    #[test]
+    fn catalog_without_modalities_is_unknown() {
+        let raw = r#"{"openai": {"models": {"gpt-5": {"limit": {"context": 128000}}}}}"#;
+        let dir = seed_models_dev_cache("no-modalities", raw);
+        assert_eq!(is_vlm("gpt-5", Some(&dir)), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// OpenRouter's `architecture.input_modalities` is the fallback source.
+    #[test]
+    fn openrouter_architecture_is_the_modality_fallback() {
+        let dir = std::env::temp_dir().join(format!(
+            "cosh-modalities-openrouter-{}",
+            std::process::id()
+        ));
+        let cache = CatalogCache::new(dir.clone());
+        let raw = r#"{"data":[{"id":"google/gemini-2.5-flash","architecture":{"input_modalities":["text","image"]}},{"id":"zhipuai/glm-5","architecture":{"input_modalities":["text"]}}]}"#;
+        cache.save_raw(OPENROUTER_CATALOG_FILE, raw);
+        let dir = dir.to_string_lossy().into_owned();
+
+        assert_eq!(is_vlm("gemini-2.5-flash", Some(&dir)), Some(true));
+        assert_eq!(is_vlm("glm-5", Some(&dir)), Some(false));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

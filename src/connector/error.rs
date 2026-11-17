@@ -39,6 +39,22 @@ pub enum ConnectorError {
         /// heuristic hint for local budget checks — never a hard contract.
         window_tokens: Option<usize>,
     },
+    /// The upstream rejected the request because one of its messages carried
+    /// an image/vision part the model cannot read (a text-only model, e.g.
+    /// `"This API supports text input only. This conversation contains an
+    /// image."`).
+    ///
+    /// Classified from the BODY, like [`Self::ContextWindowExceeded`]: the
+    /// status alone says nothing (a 400 is also a broken tool argument), so
+    /// the caller can only act on this signal without guessing. Retrying the
+    /// same request is pointless — the conversation has to stop carrying
+    /// images (and the tools that produce them) first.
+    ImageInputUnsupported {
+        /// HTTP status code (400/422 on every provider seen so far).
+        status: u16,
+        /// Response body from the server.
+        body: String,
+    },
     /// Failed to parse the response body as JSON.
     Deserialization(String),
     /// A network-level error occurred (connection refused, timeout, etc.).
@@ -104,6 +120,8 @@ impl ConnectorError {
                 window_tokens: parse_window_tokens(&body),
                 body,
             }
+        } else if looks_like_image_unsupported(status, &body) {
+            Self::ImageInputUnsupported { status, body }
         } else {
             Self::HttpError {
                 status,
@@ -112,6 +130,12 @@ impl ConnectorError {
                 body,
             }
         }
+    }
+
+    /// True when the provider rejected the request for carrying an image its
+    /// model cannot read.
+    pub fn is_image_input_unsupported(&self) -> bool {
+        matches!(self, Self::ImageInputUnsupported { .. })
     }
 
     /// True when this error is a context-window overflow.
@@ -168,6 +192,45 @@ fn looks_like_context_window(body: &str) -> bool {
         "reduce the amount",
     ];
     MARKERS.iter().any(|m| lower.contains(m))
+}
+
+/// True when `(status, body)` is a provider's own statement that it cannot
+/// read images.
+///
+/// Deliberately strict — a false positive would strip a capable model's
+/// screenshot tool for the whole process, so a match requires ALL of:
+///
+/// 1. a 400-class status (`400`/`422`; local servers answer 400 here too);
+/// 2. the body to be about image/vision input at all;
+/// 3. a marker that states the modality is unsupported, not that a
+///    particular image was malformed (bad base64 or a wrong MIME type is a
+///    caller bug, not a model without vision).
+fn looks_like_image_unsupported(status: u16, body: &str) -> bool {
+    if !matches!(status, 400 | 422) {
+        return false;
+    }
+    let lower = body.to_lowercase();
+    if !(lower.contains("image") || lower.contains("vision")) {
+        return false;
+    }
+    const MARKERS: &[&str] = &[
+        // The OpenAI-compatible phrasing observed in the field.
+        "supports text input only",
+        "text input only",
+        "text-only",
+        "does not support image",
+        "doesn't support image",
+        "does not support vision",
+        "doesn't support vision",
+        "image input is not supported",
+        "images are not supported",
+        "image content is not supported",
+        "image_url is not supported",
+        "no image input",
+        "cannot process images",
+        "cannot read images",
+    ];
+    MARKERS.iter().any(|marker| lower.contains(marker))
 }
 
 /// Whether the number ending at byte offset `i` is immediately followed by a
@@ -303,7 +366,8 @@ impl fmt::Display for ConnectorError {
             Self::UnknownProvider(p) => write!(f, "Unknown provider: {p}"),
             Self::MissingApiKey(p) => write!(f, "API key not set for provider: {p}"),
             Self::HttpError { status, body, .. } => write!(f, "HTTP {status} - {body}"),
-            Self::ContextWindowExceeded { status, body, .. } => {
+            Self::ContextWindowExceeded { status, body, .. }
+            | Self::ImageInputUnsupported { status, body } => {
                 write!(f, "HTTP {status} - {body}")
             }
             Self::Deserialization(e) => write!(f, "Failed to parse response: {e}"),
@@ -345,6 +409,54 @@ impl From<serde_json::Error> for ConnectorError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The body the field reported for a text-only model receiving a
+    /// screenshot: it must be classified as a modality statement, never as a
+    /// generic 400.
+    #[test]
+    fn classifies_text_only_bodies() {
+        let body = r#"{"error":{"code":"invalid_value","message":"This API supports text input only. This conversation contains an image. Remove the image from the conversation and try again.","param":"messages[52].content","type":"invalid_request_error"}}"#;
+        let err = ConnectorError::classify_http(400, body.to_string());
+        assert!(err.is_image_input_unsupported(), "{err}");
+        assert!(!err.is_context_window());
+        assert!(!err.is_transient());
+
+        for body in [
+            "This model does not support image input.",
+            "image_url is not supported for this model",
+            "The model cannot process images.",
+        ] {
+            assert!(
+                ConnectorError::classify_http(400, body.to_string()).is_image_input_unsupported(),
+                "{body}"
+            );
+        }
+    }
+
+    /// Anything short of an explicit statement stays a plain HTTP error: a
+    /// false positive would strip a capable model's screenshot tool.
+    #[test]
+    fn image_classification_rejects_everything_else() {
+        assert!(matches!(
+            ConnectorError::classify_http(400, "invalid base64 in image_url".to_string()),
+            ConnectorError::HttpError { .. }
+        ));
+        // An image marker on a non-400 status is not the modality statement
+        // this classifier is for.
+        assert!(matches!(
+            ConnectorError::classify_http(500, "does not support image input".to_string()),
+            ConnectorError::HttpError { .. }
+        ));
+        // A text-only phrasing with no image/vision subject is unrelated.
+        assert!(matches!(
+            ConnectorError::classify_http(400, "this endpoint supports text input only".to_string()),
+            ConnectorError::HttpError { .. }
+        ));
+        assert!(matches!(
+            ConnectorError::classify_http(400, "unknown field 'foo'".to_string()),
+            ConnectorError::HttpError { .. }
+        ));
+    }
 
     #[test]
     fn classifies_context_window_bodies() {

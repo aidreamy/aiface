@@ -36,7 +36,8 @@ pub use crate::NativeToolCall;
 // OAuth surface is public, like `openai_compatible`'s).
 pub use copilot::oauth as copilot_oauth;
 pub use discovery::{
-    ModelReasoning, discover_context_window, effective_context_window, model_reasoning,
+    ModelModalities, ModelReasoning, discover_context_window, effective_context_window, is_vlm,
+    is_vlm_for, model_input_modalities, model_input_modalities_for, model_reasoning,
     model_reasoning_from_catalog, refresh_pricing_catalog, resolve_reasoning_effort,
 };
 pub use error::ConnectorError;
