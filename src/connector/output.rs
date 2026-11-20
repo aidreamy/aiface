@@ -526,6 +526,12 @@ pub(crate) fn extract_family_images(family: Family, raw: &str) -> Vec<GeneratedI
 /// (1 USD = 10^10 ticks); it is converted to USD here so every consumer
 /// sees one unit.
 ///
+/// Copilot reports the REAL billed amount as `copilotUsage.totalNanoAiu`
+/// (nano-AI units: 1,000,000,000 nano-AIU = 1 AI credit, 1 credit = USD
+/// 0.01). Its top-level `cost` is a billing MULTIPLIER (premium-request
+/// units), NOT money, so `copilotUsage` is checked first and the multiplier
+/// is never read as dollars.
+///
 /// The Vercel AI Gateway carries the per-request spend OUTSIDE the usage
 /// object, as `providerMetadata.gateway.cost` (stringly typed on the wire,
 /// e.g. `"0.00849"`); it is checked after `usage.cost` so the more specific
@@ -550,6 +556,30 @@ pub(crate) fn extract_reported_cost(raw: &str) -> Option<f64> {
         } else {
             None
         };
+    }
+    // Copilot: the top-level `cost` is a billing multiplier (for example a
+    // premium-request weight of 15), not a currency amount. The real billed
+    // figure rides `copilotUsage.totalNanoAiu`; convert it to USD before any
+    // generic `cost` shape can be mistaken for money.
+    if let Some(nano_aiu) = v
+        .get("copilotUsage")
+        .and_then(|billing| billing.get("totalNanoAiu"))
+        .and_then(serde_json::Value::as_f64)
+    {
+        let usd = nano_aiu / 1_000_000_000.0 * 0.01;
+        return if usd.is_finite() && usd >= 0.0 {
+            Some(usd)
+        } else {
+            None
+        };
+    }
+    // Copilot frames are the only ones with TOP-LEVEL camelCase counters.
+    // When such a frame carries no `copilotUsage` billing breakdown, its
+    // `cost` is only the multiplier: there is no price to report. Without
+    // this guard the generic top-level `cost` fallback (meant for the
+    // OpenCode Zen/Go trailer) would read the multiplier as dollars.
+    if v.get("inputTokens").is_some() || v.get("outputTokens").is_some() {
+        return None;
     }
     let cost = money_value(cost_field(&v)?)?;
     if cost.is_finite() && cost >= 0.0 {
@@ -746,6 +776,23 @@ mod tests {
     fn usage_cost_takes_precedence_over_top_level() {
         let raw = r#"{"usage":{"prompt_tokens":8,"cost":0.95},"cost":"0"}"#;
         assert_eq!(extract_reported_cost(raw), Some(0.95));
+    }
+
+    /// Copilot's `cost` is a request MULTIPLIER, not USD; the billed amount
+    /// is `copilotUsage.totalNanoAiu` (1e9 nano-AIU = 1 AI credit =
+    /// $0.01). Reading `cost` as dollars made a short session show $15.
+    #[test]
+    fn extracts_copilot_cost_from_nano_ai_units_not_multiplier() {
+        let raw = r#"{"inputTokens":100,"outputTokens":20,"cost":15,
+            "copilotUsage":{"totalNanoAiu":420000000}}"#;
+        assert_eq!(extract_reported_cost(raw), Some(0.0042));
+        // A frame with only the multiplier has no price at all.
+        let raw = r#"{"inputTokens":100,"outputTokens":20,"cost":15}"#;
+        assert_eq!(extract_reported_cost(raw), None);
+        // A real zero remains a real zero.
+        let raw = r#"{"inputTokens":10,"outputTokens":5,"cost":1,
+            "copilotUsage":{"totalNanoAiu":0}}"#;
+        assert_eq!(extract_reported_cost(raw), Some(0.0));
     }
 
     #[test]

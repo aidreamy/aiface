@@ -94,7 +94,11 @@ struct UsageTotals {
     cache_read_tokens: i64,
     cache_write_tokens: i64,
     reasoning_tokens: i64,
-    cost: f64,
+    /// Real billed usage in nano-AI units, summed over the turn's calls
+    /// (`copilotUsage.totalNanoAiu`). The runtime's top-level `cost` field
+    /// is a billing MULTIPLIER (premium-request units), NOT money, so it is
+    /// never accumulated here.
+    total_nano_aiu: f64,
     /// The LAST raw `assistant.usage` event of the turn. Its non-counter
     /// metadata — cache TTL/expiry (`cacheExpiresAt`, `cacheTtlSeconds`),
     /// cache-frontier provenance (`frontierSource`), and the billing
@@ -126,10 +130,17 @@ impl UsageTotals {
             .get("reasoningTokens")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
-        // Cost is a per-call price, not a monotonic counter: the turn's
-        // billed total is the SUM, but per-event max would lose money — sum
-        // it like the token counters.
-        self.cost += usage.get("cost").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        // The per-request billing amount is `copilotUsage.totalNanoAiu`
+        // (nano-AI units — 1,000,000,000 nano-AIU = 1 AI credit and
+        // 1 AI credit = USD 0.01). It is a per-call value, so the turn's
+        // total is the SUM. The sibling top-level `cost` is a request
+        // MULTIPLIER: adding it up and labelling the result dollars is what
+        // made a short Copilot session show a wildly inflated price.
+        self.total_nano_aiu += usage
+            .get("copilotUsage")
+            .and_then(|v| v.get("totalNanoAiu"))
+            .and_then(serde_json::Value::as_f64)
+            .unwrap_or(0.0);
         self.last_event = Some(usage.clone());
     }
 
@@ -149,7 +160,25 @@ impl UsageTotals {
             map.insert("cacheReadTokens".into(), self.cache_read_tokens.into());
             map.insert("cacheWriteTokens".into(), self.cache_write_tokens.into());
             map.insert("reasoningTokens".into(), self.reasoning_tokens.into());
-            map.insert("cost".into(), serde_json::json!(self.cost));
+            // `cost` is the runtime's billing multiplier, not a currency
+            // amount. Dropping it keeps generic cost extractors (which read
+            // a top-level `cost` as USD for the OpenCode Zen/Go trailer)
+            // from turning a 15x multiplier into $15.
+            map.remove("cost");
+            if self.total_nano_aiu > 0.0 {
+                // Replace the LAST call's per-request figure with the turn's
+                // summed billed amount; the remaining billing metadata is
+                // preserved.
+                let copilot = map
+                    .entry("copilotUsage")
+                    .or_insert_with(|| serde_json::json!({}));
+                if let Some(fields) = copilot.as_object_mut() {
+                    fields.insert(
+                        "totalNanoAiu".into(),
+                        serde_json::json!(self.total_nano_aiu),
+                    );
+                }
+            }
         }
         obj
     }
@@ -983,13 +1012,19 @@ mod tests {
     fn usage_sums_across_model_calls() {
         let mut events = Vec::new();
         let mut result = TurnResult::default();
-        for (input, output, cost) in [(100i64, 20i64, 0.001f64), (50, 10, 0.002)] {
+        for (input, output, nano_aiu) in [
+            (100i64, 20i64, 100_000_000f64),
+            (50, 10, 200_000_000f64),
+        ] {
             let ev = event(
                 "assistant.usage",
                 serde_json::json!({
                     "inputTokens": input,
                     "outputTokens": output,
-                    "cost": cost,
+                    // A billing multiplier, NOT dollars: it must not be
+                    // summed into the turn's price.
+                    "cost": 15,
+                    "copilotUsage": { "totalNanoAiu": nano_aiu },
                     "finishReason": "stop",
                 }),
             );
@@ -1004,7 +1039,10 @@ mod tests {
         let usage = result.usage.expect("usage accumulated");
         assert_eq!(usage["inputTokens"], 150);
         assert_eq!(usage["outputTokens"], 30);
-        assert_eq!(usage["cost"], 0.003);
+        // Per-call billed amounts are summed across the turn's calls.
+        assert_eq!(usage["copilotUsage"]["totalNanoAiu"], 300_000_000.0);
+        // The multiplier is never surfaced as a money field.
+        assert!(usage.get("cost").is_none());
     }
 
     #[test]

@@ -10,10 +10,25 @@
 //!   `inputTokens`), so `total_input_tokens()` stays correct;
 //! - `cache_write_tokens` maps the runtime's `cacheWriteTokens`;
 //! - `reasoning_tokens` carries the runtime's reasoning counter;
-//! - `reported_cost` carries the runtime's `cost` field (USD) when the
-//!   backend reported one.
+//! - `reported_cost` converts the runtime's REAL billed amount,
+//!   `copilotUsage.totalNanoAiu`, to USD. The sibling top-level `cost`
+//!   field is a billing MULTIPLIER (premium-request units), NOT money, so
+//!   it is deliberately ignored.
 
 use crate::connector::usage::TokenUsage;
+
+/// 1,000,000,000 nano-AI units make one AI credit (the SDK's
+/// `TokenPriceUnit::NanoAiu` contract).
+const NANO_AIU_PER_AI_CREDIT: f64 = 1_000_000_000.0;
+
+/// GitHub bills one AI credit at USD 0.01
+/// (docs.github.com > Copilot > billing).
+const USD_PER_AI_CREDIT: f64 = 0.01;
+
+/// Convert a `totalNanoAiu` amount to USD.
+fn nano_aiu_to_usd(nano_aiu: f64) -> f64 {
+    nano_aiu / NANO_AIU_PER_AI_CREDIT * USD_PER_AI_CREDIT
+}
 
 /// Extract completion tokens from a raw usage payload.
 ///
@@ -30,6 +45,13 @@ pub fn extract_tokens(raw: &str) -> Option<u32> {
 pub fn extract_usage(raw: &str) -> Option<TokenUsage> {
     #[derive(serde::Deserialize)]
     #[serde(rename_all = "camelCase")]
+    struct CopilotUsage {
+        #[serde(default)]
+        total_nano_aiu: Option<f64>,
+    }
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
     struct Usage {
         #[serde(default)]
         input_tokens: Option<i64>,
@@ -42,7 +64,7 @@ pub fn extract_usage(raw: &str) -> Option<TokenUsage> {
         #[serde(default)]
         reasoning_tokens: Option<i64>,
         #[serde(default)]
-        cost: Option<f64>,
+        copilot_usage: Option<CopilotUsage>,
     }
     let v: serde_json::Value = serde_json::from_str(raw).ok()?;
     let usage: Usage = serde_json::from_value(v.clone()).ok()?;
@@ -62,7 +84,11 @@ pub fn extract_usage(raw: &str) -> Option<TokenUsage> {
             .unwrap_or(0),
         cache_read_input_tokens: cache_read.try_into().unwrap_or(0),
         reasoning_tokens: usage.reasoning_tokens.unwrap_or(0).try_into().unwrap_or(0),
-        reported_cost: usage.cost,
+        reported_cost: usage
+            .copilot_usage
+            .and_then(|billing| billing.total_nano_aiu)
+            .map(nano_aiu_to_usd)
+            .filter(|usd| usd.is_finite() && *usd >= 0.0),
         reported_cost_credits: None,
     })
 }
@@ -73,8 +99,10 @@ mod tests {
 
     #[test]
     fn extracts_usage_with_cache_and_reasoning() {
+        // 420,000,000 nano-AIU = 0.42 AI credits = USD 0.0042.
         let json = r#"{"inputTokens":100,"outputTokens":20,"cacheReadTokens":40,
-            "cacheWriteTokens":5,"reasoningTokens":8,"cost":0.0042}"#;
+            "cacheWriteTokens":5,"reasoningTokens":8,
+            "copilotUsage":{"totalNanoAiu":420000000}}"#;
         let usage = extract_usage(json).expect("usage present");
         assert_eq!(usage.input_tokens, 60);
         assert_eq!(usage.output_tokens, 20);
@@ -82,6 +110,23 @@ mod tests {
         assert_eq!(usage.cache_creation_input_tokens, 5);
         assert_eq!(usage.reasoning_tokens, 8);
         assert_eq!(usage.reported_cost, Some(0.0042));
+    }
+
+    #[test]
+    fn multiplier_cost_is_not_money() {
+        // The runtime's top-level `cost` is a billing multiplier (premium
+        // requests), not USD. A 15x multiplier must never become $15.
+        let json = r#"{"inputTokens":100,"outputTokens":20,"cost":15}"#;
+        let usage = extract_usage(json).expect("usage present");
+        assert_eq!(usage.reported_cost, None);
+    }
+
+    #[test]
+    fn zero_nano_aiu_is_a_real_zero_cost() {
+        let json = r#"{"inputTokens":10,"outputTokens":5,
+            "copilotUsage":{"totalNanoAiu":0}}"#;
+        let usage = extract_usage(json).expect("usage present");
+        assert_eq!(usage.reported_cost, Some(0.0));
     }
 
     #[test]
