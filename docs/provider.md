@@ -86,7 +86,7 @@ tests can keep mocking exact URLs.
 `x-preview-f-free`, key env `OPENCODE_API_KEY`). The gateway deliberately
 serves an ANONYMOUS free tier: requests carrying the sentinel bearer
 [`ZEN_PUBLIC_KEY`] (`"public"`) are answered only for models flagged
-`allowAnonymous` server-side and are rate-limited per IP. cosh's rules for
+`allowAnonymous` server-side and are rate-limited per IP. The rules for
 using it — enforced in code, not convention:
 
 - **Account keys always win.** A key resolved from keyring/env (or passed via
@@ -227,48 +227,59 @@ effort, and image input work through the shared family path unchanged.
 
 **Decision — no AWS SDK.** The full `aws-sdk-bedrockruntime` (and its
 `Converse` API, SigV4 chain, Guardrails, embeddings) is deliberately NOT a
-dependency: the OpenAI-compatible endpoint covers everything cosh needs and
-the SDK would pull dozens of crates into the slim build. If a future
+dependency: the OpenAI-compatible endpoint covers every surface the crate
+exposes and the SDK would pull dozens of crates into the slim build. If a future
 requirement genuinely needs the native surface, the plan is to add it as an
 opt-in **feature gate** (`bedrock-sdk`) wrapping the SDK behind the existing
 isolated-family pattern — not to replace this integration.
 
 ## API key resolution
 
+The keyring service is **the consumer's name, not the library's**: `aiface`
+stores nothing and has no application identity, so the OS keyring is only
+consulted when the caller passes the service its app writes keys under. With
+`None`, resolution skips the keyring and uses the environment only.
+
 ```rust,ignore
-pub const COSH_SERVICE: &str = "cosh"; // default keyring service (kept for compatibility)
+const MY_APP_SERVICE: &str = "my-app";
 
 pub fn get_api_key(provider: &str, service: Option<&str>) -> Option<String>
-pub fn has_api_key(provider: &str) -> bool
-pub fn detect_provider() -> Option<&'static str>
+pub fn has_api_key(provider: &str, service: Option<&str>) -> bool
+pub fn detect_provider(service: Option<&str>) -> Option<&'static str>
+pub fn forget_provider_key(provider: &str, service: &str) -> Result<(), keyring::Error>
 
-// Example: Check if a provider is configured
-if has_api_key("openai") {
+// Example: Check if a provider is configured (keyring + environment)
+if has_api_key("openai", Some(MY_APP_SERVICE)) {
     println!("OpenAI is configured");
 }
 
-// Example: Get the API key (respects priority: keyring → env → explicit)
+// Example: Get the API key from the environment only
 if let Some(key) = get_api_key("anthropic", None) {
-    println!("Found Anthropic key");
+    println!("Found Anthropic key in the environment");
 }
 
 // Example: Detect which provider the user is most likely using
-if let Some(provider) = detect_provider() {
+if let Some(provider) = detect_provider(Some(MY_APP_SERVICE)) {
     println!("Default provider: {}", provider);
 }
+
+// Example: Delete a saved custom-provider credential
+forget_provider_key("my-endpoint", MY_APP_SERVICE)?;
 ```
 
 Resolution order:
 
 1. **OS keyring** — the authoritative store for keys saved explicitly through
-   the app (`keyring::Entry` under `cosh` by default). Preferring it over the
-   environment means stale shell/`.env` exports can't shadow a key the user
-   configured.
+   the app (`keyring::Entry` under the service the consumer names with
+   `with_service_keyring`; no keyring lookup happens without it). Preferring
+   it over the environment means stale shell/`.env` exports can't shadow a
+   key the user configured.
 
 > **Why keyring takes priority:** Users who explicitly save keys through the app have made a deliberate configuration choice. Environment variables are often temporary (session exports, `.env` files for development) and can become stale. By preferring keyring, we ensure the user's intentional configuration isn't accidentally overridden by forgotten environment state.
 
 2. **Environment variable** — per-provider fallback for providers never
-   stored (`get_api_key("openai", None)` reads `OPENAI_API_KEY`).
+   stored. `get_api_key("openai", None)` reads `OPENAI_API_KEY` and never
+   touches the keyring.
 
 Successful keyring lookups are cached in a process-lifetime map (keyed by
 `(service, env_var)`) so repeated resolutions don't re-hit the OS credential
@@ -283,10 +294,11 @@ pub fn clear_api_key_cache()               // forget everything
 Call `invalidate_api_key` after **storing or updating** a key, or the cache
 serves the stale value.
 
-- `has_api_key(provider)` — "configured?" regardless of backend (keyring or
-  env).
-- `detect_provider()` — the first provider (in registration order) that has
-  a key; the natural default for "which provider is this user using?"
+- `has_api_key(provider, service)` — "configured?" regardless of backend
+  (keyring or env); `None` checks the environment only.
+- `detect_provider(service)` — the first provider (in registration order)
+  that has a key; the natural default for "which provider is this user
+  using?"
 
 ---
 
@@ -301,7 +313,7 @@ Next: [discovery — context windows and reasoning](discovery.md).
 - Enumeration: `known_providers()` (iterator), `known_providers_with_env()` (pairs with env vars), and `get_provider_env_var()` (env var name for a provider). Local providers are excluded from `known_providers_with_env` — they have no key and must not be "detected" as configured cloud providers.
 - `is_local_provider` / `known_local_providers` classify the registry; `get_provider` returns the full `ProviderConfig` (default port, family, model).
 - `normalize_local_base_url(provider, url)` appends `/v1` for bare OpenAI-compatible URLs; it is applied at request time in the TUI layer, never persisted.
-- API key resolution: OS keyring (authoritative store under `cosh` service) → environment variable (fallback) → explicit `with_api_key` (highest priority).
+- API key resolution: OS keyring (authoritative store under the consumer-named service; skipped entirely when none is set) → environment variable (fallback) → explicit `with_api_key` (highest priority).
 - Keyring lookups are cached per process lifetime (keyed by service + env var) and `Zeroizing`; misses are never cached so externally-added keys appear immediately.
 - Cache invalidation: `invalidate_api_key(env_var)` after storing/updating a key, or `clear_api_key_cache()` to forget everything.
-- `has_api_key(provider)` answers "configured?" regardless of backend; `detect_provider()` returns the first provider with a key (natural default).
+- `has_api_key(provider, service)` answers "configured?" regardless of backend; `detect_provider(service)` returns the first provider with a key (natural default).

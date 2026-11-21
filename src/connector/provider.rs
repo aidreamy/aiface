@@ -6,15 +6,6 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, PoisonError, RwLock};
 use zeroize::Zeroizing;
 
-/// Default keyring service under which cosh stores its API keys.
-///
-/// `Connector`'s parameters already default `service_keyring` to this value,
-/// so ordinary consumers don't need to reference it — it exists so the SDK
-/// reads keys under the same service string that the TUI writes via
-/// `save_provider_api_key`. Override only builders that pass a custom
-/// service: [`Connector::with_service_keyring`](crate::connector::Connector::with_service_keyring).
-pub const COSH_SERVICE: &str = "cosh";
-
 /// Provider name of the DOCUMENTED OpenCode Zen gateway
 /// (`https://opencode.ai/zen/v1`, `https://opencode.ai/docs/zen`).
 ///
@@ -68,7 +59,7 @@ type KeyringCache = HashMap<(String, String), CachedKeyringValue>;
 /// memory, so repeated resolutions (model listing, chat, provider detection)
 /// avoid re-hitting the OS credential store on every call. Successful
 /// lookups are cached for the process lifetime. Misses expire after 30 seconds;
-/// keys saved through cosh invalidate their entry immediately.
+/// keys saved through the consumer's app invalidate their entry immediately.
 ///
 /// Cache omitting Zeroizing would hold keys in plain `String` for the whole
 /// process too; `Zeroizing` makes sure the memory is wiped when an entry is
@@ -749,8 +740,7 @@ fn custom_provider_lookup(name: &str) -> Option<&'static ProviderConfig> {
 /// sibling.
 ///
 /// Keys resolve through the shared keyring path under the provider's own
-/// name (`cosh` service, `<NAME>_API_KEY` env var) — the same storage the
-/// API-key dialog writes.
+/// name (`<NAME>_API_KEY` env var) under the service the consumer configured.
 ///
 /// # Errors
 ///
@@ -840,7 +830,7 @@ pub fn custom_provider_names() -> Vec<&'static str> {
 }
 
 /// Delete a custom provider's keyring credential (Settings removal path):
-/// the `<NAME>_API_KEY` entry under the cosh service, plus its cached
+/// the `<NAME>_API_KEY` entry under the caller's `service`, plus its cached
 /// value. A missing entry is success — forgetting an endpoint that never
 /// had a key saved is a no-op, not an error.
 ///
@@ -848,9 +838,9 @@ pub fn custom_provider_names() -> Vec<&'static str> {
 ///
 /// Returns the keyring error when the credential exists but cannot be
 /// deleted (locked store, platform failure).
-pub fn forget_provider_key(provider: &str) -> Result<(), keyring::Error> {
+pub fn forget_provider_key(provider: &str, service: &str) -> Result<(), keyring::Error> {
     let env_var = custom_provider_env_var(provider);
-    let result = match Entry::new(COSH_SERVICE, &env_var) {
+    let result = match Entry::new(service, &env_var) {
         Ok(entry) => match entry.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(err) => Err(err),
@@ -877,11 +867,14 @@ pub fn forget_provider_key(provider: &str) -> Result<(), keyring::Error> {
 fn resolve_env_var_key(service: &str, env_var: &str) -> Option<String> {
     keyring_lookup(service, env_var)
         .filter(|key| !key.trim().is_empty())
-        .or_else(|| {
-            std::env::var(env_var)
-                .ok()
-                .filter(|key| !key.trim().is_empty())
-        })
+        .or_else(|| env_var_key(env_var))
+}
+
+/// Read an API key from the environment, ignoring blank values.
+fn env_var_key(env_var: &str) -> Option<String> {
+    std::env::var(env_var)
+        .ok()
+        .filter(|key| !key.trim().is_empty())
 }
 
 /// The API-key variable derived for a custom provider: `<NAME>_API_KEY`,
@@ -897,6 +890,8 @@ pub fn custom_provider_env_var(provider: &str) -> String {
     )
 }
 
+/// Resolve a provider's API key: keyring under `service` first, then the
+/// provider's environment variable. `None` reads the environment only.
 pub fn get_api_key(provider: &str, service: Option<&str>) -> Option<String> {
     // Custom providers resolve under a stable derived variable
     // (`<NAME>_API_KEY`, uppercased like every table entry) without
@@ -922,8 +917,11 @@ pub fn get_api_key(provider: &str, service: Option<&str>) -> Option<String> {
     // through the app (ADD Provider). Prefer it over the process environment
     // so stale shell/.env exports don't shadow the key the user configured.
     // Environment variables remain a fallback for providers never stored.
-    let service = service.unwrap_or(COSH_SERVICE);
-    if let Some(key) = resolve_env_var_key(service, env_var) {
+    let key = match service {
+        Some(service) => resolve_env_var_key(service, env_var),
+        None => env_var_key(env_var),
+    };
+    if let Some(key) = key {
         return Some(key);
     }
 
@@ -933,10 +931,14 @@ pub fn get_api_key(provider: &str, service: Option<&str>) -> Option<String> {
         .iter()
         .find(|(name, _)| *name == provider)
         .map(|(_, var)| *var);
-    if let Some(fallback_var) = fallback
-        && let Some(key) = resolve_env_var_key(service, fallback_var)
-    {
-        return Some(key);
+    if let Some(fallback_var) = fallback {
+        let fallback_key = match service {
+            Some(service) => resolve_env_var_key(service, fallback_var),
+            None => env_var_key(fallback_var),
+        };
+        if let Some(key) = fallback_key {
+            return Some(key);
+        }
     }
 
     None
@@ -1087,24 +1089,26 @@ pub fn known_providers_with_env() -> impl Iterator<Item = (&'static str, &'stati
 }
 
 /// Whether a provider has an API key available, either from the OS credential
-/// store (keyring) under the cosh service or from its environment variable.
+/// store (keyring, under the caller's `service`) or from its environment
+/// variable.
 ///
 /// Useful for the UI to decide whether a provider is "configured" without
 /// having to distinguish between the two storage backends. Resolution order
-/// matches [`get_api_key`]: keyring first, then environment.
+/// matches [`get_api_key`].
 #[must_use]
-pub fn has_api_key(provider: &str) -> bool {
-    get_api_key(provider, Some(COSH_SERVICE)).is_some()
+pub fn has_api_key(provider: &str, service: Option<&str>) -> bool {
+    get_api_key(provider, service).is_some()
 }
 
 /// Return the first provider with an available API key.
 ///
-/// Checks both the environment variables and the OS credential store. The
+/// Checks both the environment variables and the OS credential store under
+/// the caller's `service` (pass `None` to check the environment only). The
 /// iteration order follows the registration order in the provider table.
 #[must_use]
-pub fn detect_provider() -> Option<&'static str> {
+pub fn detect_provider(service: Option<&str>) -> Option<&'static str> {
     PROVIDERS
         .iter()
-        .find(|(name, _)| has_api_key(name))
+        .find(|(name, _)| has_api_key(name, service))
         .map(|(name, _)| *name)
 }

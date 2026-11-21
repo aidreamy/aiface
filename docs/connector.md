@@ -50,15 +50,28 @@ shared parameters onto its native format.
 
 API keys resolve in this order (see [`provider`](provider.md)):
 
-1. **OS keyring** (under the `cosh` service) — the authoritative store for
-   keys saved through the app;
+1. **OS keyring** — the authoritative store for keys saved through the app,
+   read under the service the consumer names with `with_service_keyring`.
+   `aiface` owns no service name: until the consumer sets one, this step is
+   skipped entirely;
 2. **Environment variable** — per-provider fallback (`OPENAI_API_KEY`,
    `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, …);
 3. **Explicit** `with_api_key("...")` — overrides both for that connector.
 
-`has_api_key(provider)` / `detect_provider()` answer "is this provider
-configured?" and "which provider is the user most likely using?" without
-distinguishing the storage backend.
+`has_api_key(provider, service)` / `detect_provider(service)` answer "is this
+provider configured?" and "which provider is the user most likely using?"
+without distinguishing the storage backend; pass `None` to ignore the keyring.
+
+```rust,ignore
+const MY_APP_SERVICE: &str = "my-app";
+
+let connector = Connector::new("openai")?
+    .with_service_keyring(MY_APP_SERVICE);
+
+if has_api_key("openai", Some(MY_APP_SERVICE)) {
+    // configured through the OS keyring or OPENAI_API_KEY
+}
+```
 
 ## A note on the internals
 

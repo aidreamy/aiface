@@ -1,8 +1,6 @@
 use std::time::Duration;
 use zeroize::Zeroize;
 
-use crate::connector::provider::COSH_SERVICE;
-
 /// A Claude extended-thinking block captured from a previous response.
 ///
 /// Replayed VERBATIM (text + signature) at the start of the assistant
@@ -480,6 +478,9 @@ pub struct Parameters {
     #[zeroize(skip)]
     pub(crate) image_response_format: Option<String>,
 
+    /// OS keyring service the consumer stores its API keys under. `None`
+    /// skips the keyring: keys then resolve from the environment or
+    /// [`with_api_key`](crate::connector::Connector::with_api_key).
     pub(crate) service_keyring: Option<String>,
     pub(crate) api_key: Option<String>,
 }
@@ -515,9 +516,7 @@ impl Default for Parameters {
             image_size: None,
             image_quality: None,
             image_response_format: None,
-            // Default to the canonical cosh keyring service so callers only
-            // need `with_service_keyring` when they want to override it.
-            service_keyring: Some(COSH_SERVICE.to_string()),
+            service_keyring: None,
             api_key: None,
         }
     }

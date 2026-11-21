@@ -51,7 +51,7 @@ async fn bedrock_key_resolves_from_env() {
         super::super::get_api_key("bedrock", None).as_deref(),
         Some("aws-bearer-test")
     );
-    assert!(super::super::has_api_key("bedrock"));
+    assert!(super::super::has_api_key("bedrock", None));
     assert_eq!(
         super::super::get_provider_env_var("bedrock"),
         Some("AWS_BEARER_TOKEN_BEDROCK")

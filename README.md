@@ -6,11 +6,12 @@
 A unified multi-provider LLM client for Rust — one [`Connector`], three
 provider families, one interface.
 
-`aiface` is the standalone connector crate of
-[cosh](https://github.com/DiegoZaluski/co-sh)'s SDK: a single client that
-speaks Claude, OpenAI, Gemini, GitHub Copilot and every OpenAI-compatible
-endpoint (DeepSeek, Groq, xAI, Ollama, LM Studio, vLLM, …), with streaming
-chat, tool calling, embeddings, token usage and cost tracking.
+`aiface` is a standalone connector crate: a single client that speaks Claude,
+OpenAI, Gemini, GitHub Copilot and every OpenAI-compatible endpoint (DeepSeek,
+Groq, xAI, Ollama, LM Studio, vLLM, …), with streaming chat, tool calling,
+embeddings, token usage and cost tracking. It is application-agnostic — the
+host app supplies anything that is its own identity, including the OS keyring
+service its API keys are stored under.
 
 ## Highlights
 

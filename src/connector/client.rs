@@ -309,6 +309,9 @@ impl Connector {
         self
     }
 
+    /// Keyring service this connector reads API keys from. Without one, keys
+    /// resolve from the provider's environment variable or
+    /// [`with_api_key`](Self::with_api_key).
     pub fn with_service_keyring(mut self, v: impl Into<String>) -> Self {
         self.params.service_keyring = Some(v.into());
         self

@@ -2,10 +2,14 @@
 //! process-lifetime keyring cache, and the local-provider registry.
 
 use super::super::{
-    COSH_SERVICE, clear_api_key_cache, custom_provider_names, detect_provider, forget_provider_key,
-    get_api_key, get_provider, has_api_key, invalidate_api_key, is_local_provider,
-    known_local_providers, known_providers, normalize_local_base_url, register_custom_providers,
+    clear_api_key_cache, custom_provider_names, detect_provider, forget_provider_key, get_api_key,
+    get_provider, has_api_key, invalidate_api_key, is_local_provider, known_local_providers,
+    known_providers, normalize_local_base_url, register_custom_providers,
 };
+
+/// No application stores keys under this service, so probes never touch real
+/// user credentials.
+const TEST_SERVICE: &str = "aiface-tests-no-key";
 use super::common::{ENV_LOCK, EnvGuard};
 use crate::connector::Family;
 
@@ -14,7 +18,7 @@ use crate::connector::Family;
 async fn has_api_key_env() {
     let _lock = ENV_LOCK.lock().await;
     let _guard = EnvGuard::set("OPENAI_API_KEY", "sk-test");
-    assert!(has_api_key("openai"));
+    assert!(has_api_key("openai", None));
 }
 
 /// REGRESSION (empty env export): a shell profile exporting `FOO_API_KEY=`
@@ -25,28 +29,13 @@ async fn has_api_key_env() {
 /// silent while the send failed deep inside the HTTP call with a
 /// non-auth-shaped error. An empty value resolves to None everywhere.
 ///
-/// Hermeticity: `has_api_key` consults the REAL `cosh` service keyring
-/// before the env var, so a machine with a key saved through the app's ADD
-/// Provider flow would spuriously flip these assertions — and DELETING the
-/// entry would destroy a real user credential. The prologue SKIPS the test
-/// when a non-blank keyring key exists (mirroring the cache tests'
-/// no-keyring skip); blank entries need no cleanup — the filter under test
-/// ignores them by construction.
+/// The keyring stays out of the way (`service: None`).
 #[tokio::test]
 async fn empty_env_value_is_not_a_credential() {
     let _lock = ENV_LOCK.lock().await;
-    for env_var in ["OPENAI_API_KEY", "OPENCODE_API_KEY"] {
-        if let Ok(entry) = keyring::Entry::new(super::super::COSH_SERVICE, env_var)
-            && let Ok(stored) = entry.get_password()
-            && !stored.trim().is_empty()
-        {
-            eprintln!("skipping: a real {env_var} key exists in the cosh keyring");
-            return;
-        }
-    }
     let _guard = EnvGuard::set("OPENAI_API_KEY", "");
     assert!(
-        !has_api_key("openai"),
+        !has_api_key("openai", None),
         "an empty env export is a placeholder, not a configured key"
     );
     assert_eq!(
@@ -57,14 +46,14 @@ async fn empty_env_value_is_not_a_credential() {
     // The fallback-var path filters symmetrically.
     let _guard_go = EnvGuard::set("OPENCODE_API_KEY", "");
     assert!(
-        !has_api_key("opencode-go"),
+        !has_api_key("opencode-go", None),
         "the fallback env var is filtered the same way"
     );
     // Whitespace-only is the same placeholder class (a quoted-space export
     // or a stray space pasted into the ADD Provider input).
     let _guard_ws = EnvGuard::set("OPENAI_API_KEY", "   ");
     assert!(
-        !has_api_key("openai"),
+        !has_api_key("openai", None),
         "a blank env export is not a credential either"
     );
 }
@@ -74,12 +63,12 @@ async fn empty_env_value_is_not_a_credential() {
 async fn detect_provider_env() {
     let _lock = ENV_LOCK.lock().await;
     let _guard = EnvGuard::set("OPENAI_API_KEY", "sk-test");
-    assert_eq!(detect_provider(), Some("openai"));
+    assert_eq!(detect_provider(None), Some("openai"));
 }
 
 /// Successful keyring lookups are cached for the process lifetime and served
 /// without re-hitting the OS store; invalidating the env var forces a fresh
-/// read. A new key written through cosh becomes visible after invalidation.
+/// read.
 #[tokio::test]
 async fn get_api_key_caches_hits_until_invalidated() {
     let _lock = ENV_LOCK.lock().await;
@@ -258,7 +247,7 @@ async fn custom_provider_lookup_round_trip() {
 
     // The derived env var resolves: `<NAME>_API_KEY`.
     let _guard = EnvGuard::set("CORP_PROXY_API_KEY", "sk-corp");
-    assert!(has_api_key("corp-proxy"));
+    assert!(has_api_key("corp-proxy", None));
 
     // Reset so other tests never see this registration.
     register_custom_providers(Vec::new()).unwrap();
@@ -366,12 +355,13 @@ fn custom_provider_registration_rejections() {
 /// there.
 #[test]
 fn forget_provider_key_missing_entry_is_ok() {
-    let probe = keyring::Entry::new(COSH_SERVICE, "COSH_PROBE_NO_SUCH_KEY")
+    let probe = keyring::Entry::new(TEST_SERVICE, "AIFACE_PROBE_NO_SUCH_KEY")
         .and_then(|entry| entry.get_password());
     if let Err(err) = &probe
         && !matches!(err, keyring::Error::NoEntry)
     {
         return;
     }
-    forget_provider_key("never-registered-endpoint").expect("missing entry is success");
+    forget_provider_key("never-registered-endpoint", TEST_SERVICE)
+        .expect("missing entry is success");
 }

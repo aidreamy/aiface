@@ -42,7 +42,7 @@ Every `with_*` method returns `Self` (builder style) and is `#[must_use]`:
 | `with_image_response_format` | `impl Into<String>` | override the Images carrier (`"b64_json"`/`"url"`) |
 | `with_base_url` | `impl Into<String>` | override the endpoint |
 | `with_api_key` | `impl Into<String>` | explicit key (highest priority) |
-| `with_service_keyring` | `impl Into<String>` | keyring service override (default `"cosh"`) |
+| `with_service_keyring` | `impl Into<String>` | keyring service to read keys from (unset = keyring off) |
 
 Only `new` is fallible. Everything else just accumulates into `Parameters` —
 the request is validated against the provider at call time, not build time.

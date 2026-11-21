@@ -30,19 +30,22 @@ async fn main() -> Result<(), ConnectorError> {
         "  ollama env var: {:?}",
         aiface::connector::get_provider_env_var("ollama")
     );
+    // The keyring service is the consuming app's name, not the library's.
+    const MY_APP_SERVICE: &str = "aiface-example";
     println!(
         "  has_api_key(openai): {}",
-        aiface::connector::has_api_key("openai")
+        aiface::connector::has_api_key("openai", Some(MY_APP_SERVICE))
     );
     println!(
         "  detect_provider: {:?}",
-        aiface::connector::detect_provider()
+        aiface::connector::detect_provider(Some(MY_APP_SERVICE))
     );
     println!();
 
     // ── 2. Builder + introspection (no network) ──────────────────────────────
     println!("== 2. Connector builder ==");
     let connector = Connector::new("openai")?
+        .with_service_keyring(MY_APP_SERVICE)
         .with_model("gpt-4o")
         .with_temperature(0.7)
         .with_max_tokens(128);
