@@ -86,6 +86,40 @@ supported, otherwise returns the **closest** supported level (ties broken
  toward more thinking), `None` for models known to have no reasoning knob,
 and the desired level unchanged for models whose capability is unknown.
 
+## Model benchmarks
+
+`connector::benchmarks::BenchmarkCatalog` reads the official Terminal-Bench
+4.1 and DeepSWE 1.1 result feeds and resolves model IDs through Models.dev.
+Load it once and reuse the snapshot for every model lookup.
+
+```rust,ignore
+use aiface::connector::benchmarks::{Benchmark, BenchmarkCatalog};
+
+let catalog = BenchmarkCatalog::load(Some("my-app/cache")).await;
+for report in catalog.for_model(Some("anthropic"), "claude-opus-5-5") {
+    println!("{:?} {}: {:.1}% on {}",
+        report.benchmark, report.benchmark.version(),
+        report.success_rate * 100.0, report.harness);
+}
+let terminal_status = catalog.status(Benchmark::TerminalBench);
+```
+
+Each result includes the evaluated harness, reasoning effort when reported,
+success rate as a fraction, available confidence bounds, and a source link.
+Terminal-Bench reports resolution rate and DeepSWE reports pass@1. Multiple
+configurations of the same model return separate measurements. A canonical
+`publisher/model` ID also works with `provider: None`. Provider aliases match
+when the catalog confirms the same version and variant. A gateway route
+linked by the leaderboard is also queryable by its exact ID. Rows with
+unresolved identities remain available through `results()`.
+
+`load` reuses fresh disk snapshots for 24 hours and falls back to the last
+valid snapshot for each unavailable source. `status` distinguishes a fresh
+fetch, cached data and an unavailable feed. `identity_status()` reports the
+same information for Models.dev. `load_cached(cache_dir)` provides an offline
+entry point. The cache directory follows the same rules as the other
+discovery APIs.
+
 ---
 
 Back to the [module overview](connector.md).

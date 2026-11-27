@@ -7,6 +7,7 @@
 //! All providers share the same interface — swap the name passed to
 //! [`Connector::new`] to switch backends.
 
+pub mod benchmarks;
 pub(crate) mod claude;
 pub(crate) mod common;
 pub(crate) mod copilot;

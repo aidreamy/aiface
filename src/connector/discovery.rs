@@ -506,7 +506,7 @@ fn closest_effort(supported: &[String], desired: &str) -> Option<String> {
 /// (`models.dev.json` / `openrouter.json`), so passing something like
 /// `"cosh/cache/name.json"` would create a directory literally named
 /// `name.json`. Pass only the folder you want.
-fn resolve_cache_dir(user_dir: &str) -> Option<PathBuf> {
+pub(super) fn resolve_cache_dir(user_dir: &str) -> Option<PathBuf> {
     let base_dirs = directories::BaseDirs::new()?;
     Some(base_dirs.data_local_dir().join(user_dir))
 }
